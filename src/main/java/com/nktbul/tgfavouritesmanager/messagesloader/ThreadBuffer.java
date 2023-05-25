@@ -12,17 +12,22 @@ import java.util.concurrent.locks.Lock;
 public class ThreadBuffer {
     private Lock lock;
     private Condition condition;
+    private volatile boolean haveAuthorization;
+
+    private String phoneNumber;
+    private volatile boolean phoneNumberReady;
+    private String authCode;
+    private volatile boolean authRequired;
+    private volatile boolean authCodeReady;
+    private volatile boolean authCodeRequired;
+    private LoadResponse loadResponse;
+
     private List<TdApi.Message> messages;
     private boolean gotMessages;
     private boolean requiredMessages;
-    private boolean requiredLogout;
-    private boolean sendCode;
-    private String phoneNumber;
-    private boolean authorizationRequired;
-    private String authCode;
-    private volatile boolean authCodeRequired;
-    private volatile boolean authCodeReady;
-
+    private boolean logoutRequired;
+    private boolean loggedOut;
+    
     public ThreadBuffer(Lock lock, Condition condition) {
         this.lock = lock;
         this.condition = condition;
@@ -33,12 +38,32 @@ public class ThreadBuffer {
 
     public void authorize(String number) {
         this.phoneNumber = number;
-        this.authorizationRequired = true;
+        this.phoneNumberReady = true;
+        this.authRequired = true;
     }
 
-    public void resetNumber() {
+    public void logout(String number) {
+        this.phoneNumber = number;
+        this.phoneNumberReady = true;
+        this.logoutRequired = true;
+    }
+
+    public void enterAuthCode(String code) {
+        this.authCode = code;
+        this.authCodeReady = true;
+        lock.lock();
+        try {
+            condition.signal();
+        } finally {
+            lock.unlock();
+        }
+    }
+
+    public void resetNumberAndAuthCode() {
         this.phoneNumber = "";
-        this.authorizationRequired = false;
+        this.phoneNumberReady = false;
+        this.authCode = "";
+        this.authCodeReady = false;
     }
 
     public void resetMessages() {
@@ -47,10 +72,6 @@ public class ThreadBuffer {
     }
 
     public void resetLogout() {
-        this.requiredLogout = false;
-    }
-
-    public void resetSendCode() {
-        this.authCode = "";
+        this.logoutRequired = false;
     }
 }

@@ -26,8 +26,8 @@ public class LoadController {
     }
 
     @GetMapping("/logout")
-    public LoadResponse logout(){
-        return loadService.logout();
+    public LoadResponse logout(@RequestParam String phoneNumber){
+        return loadService.logout(phoneNumber);
     }
 
 }

@@ -1,20 +1,16 @@
 package com.nktbul.tgfavouritesmanager.messagesloader;
 
 import com.nktbul.tgfavouritesmanager.tgagent.TgAgent;
-import com.nktbul.tgfavouritesmanager.tgagent.TgAgentListener;
+import com.nktbul.tgfavouritesmanager.tgagent.TgAgentWithBuffer;
 import org.drinkless.tdlib.TdApi;
 import org.springframework.stereotype.Service;
 
 import java.util.ArrayList;
-import java.util.concurrent.locks.Condition;
-import java.util.concurrent.locks.Lock;
-import java.util.concurrent.locks.ReentrantLock;
 
 @Service
 public class LoadService {
-    private static final Lock lock = new ReentrantLock();
-    private static final Condition condition = lock.newCondition();
-    private final Listener listener = new Listener();
+    private static Thread authThread;
+    private static final ThreadBuffer buffer = TgAgentWithBuffer.getBuffer();
 
 
     public LoadResponse loadChatMessages() {
@@ -30,67 +26,51 @@ public class LoadService {
     }
 
     public LoadResponse authorize(String phoneNumber) {
-        TgAgent.authorize(phoneNumber, listener);
-        System.out.println("before auth code required");
-        while (!listener.authorizationCodeRequired) {
+        authThread = new Thread(new TgAgentWithBuffer());
+        authThread.start();
+        buffer.authorize(phoneNumber);
+        while (!buffer.isAuthCodeRequired()) {
             try {
-                Thread.sleep(1);
+                Thread.sleep(10);
             } catch (InterruptedException ignored) {
             }
         }
-        System.out.println("after auth code required");
-        listener.authorizationCodeRequired = false;
         return new LoadResponse("Requires authorization code!");
     }
 
-    public LoadResponse sendAuthorizationCode(String code){
-        TgAgent.setAuthorizationCode(code);
-        while (!listener.authorizationSuccessful){
+    public LoadResponse sendAuthorizationCode(String code) {
+        System.out.println("Is auth thread alive: " + authThread.isAlive());
+        buffer.enterAuthCode(code);
+        while (!buffer.isHaveAuthorization()) {
             try {
-                Thread.sleep(1);
+                Thread.sleep(10);
             } catch (InterruptedException ignored) {
             }
         }
-        listener.authorizationSuccessful = false;
+        try {
+            Thread.sleep(10000);
+        } catch (InterruptedException ignored) {
+        }
+        authThread.interrupt();
         return new LoadResponse("Authorized successfully!");
     }
 
-    public LoadResponse logout(){
-        TgAgent.logout();
-        while (!listener.logOutSuccessful){
+    public LoadResponse logout(String phoneNumber) {
+        authThread = new Thread(new TgAgentWithBuffer());
+        authThread.start();
+        buffer.logout(phoneNumber);
+        while (!buffer.isLoggedOut()) {
             try {
-                Thread.sleep(1);
+                Thread.sleep(10);
             } catch (InterruptedException ignored) {
             }
         }
-        listener.logOutSuccessful = false;
+        try {
+            Thread.sleep(10000);
+        } catch (InterruptedException ignored) {
+        }
+        authThread.interrupt();
         return new LoadResponse("Logged out successfully!");
-    }
-
-    private static class Listener implements TgAgentListener {
-        private boolean authorizationCodeRequired = false;
-        private boolean authorizationSuccessful = false;
-        private boolean logOutSuccessful = false;
-
-        @Override
-        public void authorizationCodeRequired() {
-            authorizationCodeRequired = true;
-//            lock.lock();
-//            try {
-//                waitAuthorizationCode.signal();
-//            } finally {
-//                lock.unlock();
-//            }
-        }
-
-        @Override
-        public void authorizationSuccessful() {
-            authorizationSuccessful = true;
-        }
-        @Override
-        public void logout() {
-            logOutSuccessful = true;
-        }
     }
 
 }

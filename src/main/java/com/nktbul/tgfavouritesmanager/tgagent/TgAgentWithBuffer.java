@@ -1,9 +1,7 @@
 package com.nktbul.tgfavouritesmanager.tgagent;
 
 import com.nktbul.tgfavouritesmanager.messagesloader.ThreadBuffer;
-import com.nktbul.tgfavouritesmanager.tgagent.exception.PhoneNumberRequiredException;
 import lombok.Getter;
-import lombok.Setter;
 import lombok.extern.slf4j.Slf4j;
 import org.drinkless.tdlib.Client;
 import org.drinkless.tdlib.TdApi;
@@ -39,7 +37,6 @@ public class TgAgentWithBuffer implements Runnable {
 
     private static final Lock authorizationLock = new ReentrantLock();
     private static final Condition gotAuthorization = authorizationLock.newCondition();
-    private static final Condition gotAuthorizationCode = authorizationLock.newCondition();
 
     private static final ConcurrentMap<Long, TdApi.User> users = new ConcurrentHashMap<Long, TdApi.User>();
     private static final ConcurrentMap<Long, TdApi.BasicGroup> basicGroups = new ConcurrentHashMap<Long, TdApi.BasicGroup>();
@@ -55,20 +52,12 @@ public class TgAgentWithBuffer implements Runnable {
     private static final String newLine = System.getProperty("line.separator");
     private static volatile String currentPrompt = null;
 
-    private static volatile boolean isAlreadyAuthorized = false;
     private static volatile boolean haveUser = false;
     private static volatile boolean haveMessages = false;
-    private static volatile String phoneNumber = null;
-    private static volatile boolean havePhoneNumber = false;
-    @Setter
-    private static volatile String authorizationCode = null;
-    private static volatile boolean haveAuthorizationCode = false;
-    private static volatile boolean askedForAuthorization = false;
-
     private static final Lock bufferLock = new ReentrantLock();
     private static final Condition bufferCondition = bufferLock.newCondition();
     @Getter
-    private static ThreadBuffer buffer = new ThreadBuffer(bufferLock, bufferCondition);
+    private static final ThreadBuffer buffer = new ThreadBuffer(bufferLock, bufferCondition);
 
     public static ArrayList<TdApi.Message> getFavouriteMessages() {
 //        if (!isAlreadyAuthorized) {
@@ -117,7 +106,22 @@ public class TgAgentWithBuffer implements Runnable {
 
     @Override
     public void run() {
-
+        while (true) {
+            if (buffer.isPhoneNumberReady()) {
+                if (buffer.isAuthRequired()) {
+                    System.out.println("Before authorize");
+                    authorize();
+                    buffer.setAuthRequired(false);
+                    System.out.println("After authorize");
+                }
+                if (buffer.isLogoutRequired()) {
+                    System.out.println("Before logout");
+                    logout();
+                    buffer.setLogoutRequired(false);
+                    System.out.println("After logout");
+                }
+            }
+        }
     }
 
     public static void authorize() {
@@ -128,15 +132,8 @@ public class TgAgentWithBuffer implements Runnable {
         if (Client.execute(new TdApi.SetLogStream(new TdApi.LogStreamFile("tdlib/tdlib.log", 1 << 27, false))) instanceof TdApi.Error) {
             throw new IOError(new IOException("Write access to the current directory is required"));
         }
-
         // create client
         client = Client.create(new UpdateHandler(), null, null);
-
-        if (!buffer.getPhoneNumber().isEmpty()) {
-            phoneNumber = buffer.getPhoneNumber();
-        } else {
-            throw new PhoneNumberRequiredException();
-        }
 
         // main loop
         try {
@@ -164,10 +161,6 @@ public class TgAgentWithBuffer implements Runnable {
     }
 
     public static void logout() {
-//        if (!isAlreadyAuthorized) {
-//            log.warn("Must authorize to get messages");
-//            throw new AuthorizationRequiredException("Must authorize to get messages");
-//        }
         // set log message handler to handle only fatal errors (0) and plain log messages (-1)
         Client.setLogMessageHandler(0, new LogMessageHandler());
         // disable TDLib log and redirect fatal errors and plain log messages to a file
@@ -194,8 +187,10 @@ public class TgAgentWithBuffer implements Runnable {
             haveAuthorization = false;
             canQuit = false;
             client.send(new TdApi.LogOut(), defaultHandler);
+            while (!buffer.isLoggedOut()) {
+                Thread.sleep(10);
+            }
             client.send(new TdApi.Close(), defaultHandler);
-
             while (!canQuit) {
                 System.out.println("Waiting for quit. Thread sleeping");
                 Thread.sleep(10);
@@ -259,35 +254,37 @@ public class TgAgentWithBuffer implements Runnable {
                 request.databaseDirectory = "tdlib";
                 request.useMessageDatabase = true;
                 request.useSecretChats = true;
-//                request.apiId = 94575;
                 request.apiId = 21754703;
-//                request.apiHash = "a3406de8d171bb422bb6ddf3bbd800e2";
                 request.apiHash = "5c04b750ca49e1bfae708758356ba2ef";
                 request.systemLanguageCode = "en";
                 request.deviceModel = "Desktop";
                 request.applicationVersion = "1.0";
                 request.enableStorageOptimizer = true;
-
                 client.send(request, new AuthorizationRequestHandler());
                 break;
             case TdApi.AuthorizationStateWaitPhoneNumber.CONSTRUCTOR: {
-                client.send(new TdApi.SetAuthenticationPhoneNumber(phoneNumber, null), new AuthorizationRequestHandler());
+                client.send(new TdApi.SetAuthenticationPhoneNumber(buffer.getPhoneNumber(), null), new AuthorizationRequestHandler());
+                System.out.println("Sent phone number");
                 break;
             }
             case TdApi.AuthorizationStateWaitCode.CONSTRUCTOR: {
+                System.out.println("Waiting for auth code");
+
                 buffer.setAuthCodeRequired(true);
+                buffer.getLock().lock();
                 try {
                     while (!buffer.isAuthCodeReady()) {
                         bufferCondition.await();
                     }
                 } catch (InterruptedException e) {
                     log.error("Lock interrupted while waiting authorization code: " + e.getMessage());
-                    authorizationLock.unlock();
                     break;
                 } finally {
-                    authorizationLock.unlock();
+                    buffer.getLock().unlock();
+                    System.out.println("Buffer unlocked");
                 }
-                client.send(new TdApi.CheckAuthenticationCode(authorizationCode), new AuthorizationRequestHandler());
+                client.send(new TdApi.CheckAuthenticationCode(buffer.getAuthCode()), new AuthorizationRequestHandler());
+                System.out.println("Auth code sent");
                 break;
             }
             case TdApi.AuthorizationStateWaitOtherDeviceConfirmation.CONSTRUCTOR: {
@@ -317,11 +314,10 @@ public class TgAgentWithBuffer implements Runnable {
                 break;
             }
             case TdApi.AuthorizationStateReady.CONSTRUCTOR:
+                buffer.setHaveAuthorization(true);
+                buffer.resetNumberAndAuthCode();
+
                 haveAuthorization = true;
-                isAlreadyAuthorized = true;
-                if (askedForAuthorization) {
-                    askedForAuthorization = false;
-                }
                 authorizationLock.lock();
                 try {
                     gotAuthorization.signal();
@@ -330,35 +326,21 @@ public class TgAgentWithBuffer implements Runnable {
                 }
                 break;
             case TdApi.AuthorizationStateLoggingOut.CONSTRUCTOR:
-//                haveAuthorization = false;
+                haveAuthorization = false;
+                buffer.setLoggedOut(true);
                 print("Logging out");
                 break;
             case TdApi.AuthorizationStateClosing.CONSTRUCTOR:
-//                haveAuthorization = false;
+                haveAuthorization = false;
                 print("Closing");
                 break;
             case TdApi.AuthorizationStateClosed.CONSTRUCTOR:
                 print("Closed");
                 canQuit = true;
-                isAlreadyAuthorized = false;
-                phoneNumber = null;
-                authorizationCode = null;
-                haveAuthorizationCode = false;
+                buffer.resetNumberAndAuthCode();
                 break;
             default:
                 System.err.println("Unsupported authorization state:" + newLine + TgAgentWithBuffer.authorizationState);
-        }
-    }
-
-
-    public static void setAuthorizationCode(String code) {
-        authorizationLock.lock();
-        authorizationCode = code;
-        haveAuthorizationCode = true;
-        try {
-            gotAuthorizationCode.signal();
-        } finally {
-            authorizationLock.unlock();
         }
     }
 
